@@ -11,6 +11,7 @@ namespace Volumey.CoreAudioWrapper.Wrapper
     {
         public event Action<object, SessionCreatedEventArgs> SessionCreated;
         private IAudioSessionManager2 sessionManager;
+        private readonly AudioNotificationQueue notifications = new AudioNotificationQueue();
 
         internal AudioSessionProvider(IAudioSessionManager2 sessionManager)
         {
@@ -20,9 +21,18 @@ namespace Volumey.CoreAudioWrapper.Wrapper
 
         public int OnSessionCreated(IAudioSessionControl sessionControl)
         {
-            var session = sessionControl.GetAudioSessionModel();
-            if(session != null)
-                this.SessionCreated?.Invoke(this, new SessionCreatedEventArgs(session, sessionControl));
+            // Keep the RCW alive in the closure; model construction and event
+            // registration must take place after the native callback returns.
+            notifications.Post(() =>
+            {
+                var session = sessionControl.GetAudioSessionModel();
+                if(session == null)
+                    return;
+                if(this.SessionCreated == null)
+                    session.Dispose();
+                else
+                    this.SessionCreated.Invoke(this, new SessionCreatedEventArgs(session, sessionControl));
+            });
             return 0;
         }
 
@@ -42,6 +52,8 @@ namespace Volumey.CoreAudioWrapper.Wrapper
 
         public void Dispose()
         {
+            if(!notifications.TryDispose())
+                return;
             this.UnregisterSessionNotification();
         }
     }

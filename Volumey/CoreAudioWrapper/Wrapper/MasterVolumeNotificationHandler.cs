@@ -12,6 +12,7 @@ namespace Volumey.CoreAudioWrapper.Wrapper
     {
         public event Action<VolumeChangedEventArgs> VolumeChanged;
         private IAudioEndpointVolume endpointVolume;
+        private readonly AudioNotificationQueue notifications = new AudioNotificationQueue();
 
         public MasterVolumeNotificationHandler(IAudioEndpointVolume eVolume)
         {
@@ -36,13 +37,16 @@ namespace Volumey.CoreAudioWrapper.Wrapper
             
 			int newVolumeValue = Convert.ToInt32(data.masterVolume * 100);
             
-            //prevent invoking event if new volume value is not the same as the actual device volume value
-            this.endpointVolume.GetMasterVolumeLevelScalar(out float volumeLevel);
-            var actualVolumeValue = Convert.ToInt32(volumeLevel * 100);
-            if(newVolumeValue != actualVolumeValue)
-			    return 0;
-            this.VolumeChanged?.Invoke(new VolumeChangedEventArgs(newVolumeValue, data.isMuted));
-            Marshal.DestroyStructure<AUDIO_VOLUME_NOTIFICATION_DATA>(notifyData);
+            // Copy the payload before returning: Windows owns notifyData and its
+            // lifetime ends with this callback. Never destroy or capture it.
+            bool isMuted = data.isMuted;
+            notifications.Post(() =>
+            {
+                this.endpointVolume.GetMasterVolumeLevelScalar(out float volume);
+                this.endpointVolume.GetMute(out bool muted);
+                if(newVolumeValue == Convert.ToInt32(volume * 100) && isMuted == muted)
+                    this.VolumeChanged?.Invoke(new VolumeChangedEventArgs(newVolumeValue, isMuted));
+            });
             return 0;
         }
 
@@ -54,6 +58,8 @@ namespace Volumey.CoreAudioWrapper.Wrapper
 
         public void Dispose()
         {
+            if(!notifications.TryDispose())
+                return;
             this.UnregisterMVolumeNotifications();
             this.VolumeChanged = null;
         }

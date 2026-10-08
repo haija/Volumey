@@ -50,7 +50,8 @@ namespace Volumey.DataProvider
 		private static ILog logger;
 		private static ILog Logger => logger ??= LogManager.GetLogger(typeof(DeviceProvider));
 
-		private static Dispatcher dispatcher => App.Current?.Dispatcher ?? Dispatcher.CurrentDispatcher;
+		private readonly Dispatcher dispatcher = App.Current?.Dispatcher ?? Dispatcher.CurrentDispatcher;
+		private bool disposed;
 
 		private DeviceProvider(IDeviceEnumerator deviceEnumerator, IDeviceStateNotificationHandler deviceStateHandler)
 		{
@@ -129,6 +130,8 @@ namespace Volumey.DataProvider
 		{
 			dispatcher.Invoke(() =>
 			{
+				if(disposed || !this.ActiveDevices.Contains(device))
+					return;
 				//display NoOutputDevice placeholder in mixer view before deleting the last element
 				if(this.ActiveDevices.Count == 1)
 					NoOutputDevices = true;
@@ -137,6 +140,11 @@ namespace Volumey.DataProvider
 				device.Disabled -= OnDeviceDisabled;
 				device.FormatChanged -= OnDeviceFormatChanged;
 				this.ActiveDevices.Remove(device);
+				if(this.DefaultDevice == device)
+				{
+					this.DefaultDevice = null;
+					this.DefaultDeviceChanged?.Invoke(null);
+				}
 
 				device.Dispose();
 			});
@@ -146,6 +154,13 @@ namespace Volumey.DataProvider
 		{
 			dispatcher.Invoke(() =>
 			{
+				if(this.ActiveDevices.Contains(newDevice))
+					return;
+				if(disposed || this.ActiveDevices.Any(device => device.CompareId(newDevice.Id)))
+				{
+					newDevice.Dispose();
+					return;
+				}
 				newDevice.Disabled += OnDeviceDisabled;
 				newDevice.FormatChanged += OnDeviceFormatChanged;
 				this.ActiveDevices.Add(newDevice);
@@ -164,6 +179,8 @@ namespace Volumey.DataProvider
 		{
 			dispatcher.Invoke(() =>
 			{
+				if(disposed)
+					return;
 				if(deviceId == null)
 				{
 					this.DefaultDevice = null;
@@ -206,6 +223,14 @@ namespace Volumey.DataProvider
 
 		public void Dispose()
 		{
+			if(disposed)
+				return;
+			disposed = true;
+			if(this.deviceStateNotificationHandler != null)
+			{
+				this.deviceStateNotificationHandler.DefaultDeviceChanged -= OnDefaultDeviceChanged;
+				this.deviceStateNotificationHandler.ActiveDeviceAdded -= OnActiveDeviceAdded;
+			}
 			this.deviceStateNotificationHandler?.Dispose();
 			foreach(var device in this.ActiveDevices)
 				device.Dispose();

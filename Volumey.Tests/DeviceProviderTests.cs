@@ -60,6 +60,20 @@ namespace Volumey.Tests
 			
 			Assert.Equal(deviceCount - 1, model.ActiveDevices.Count);
 			Assert.DoesNotContain(disabledDevice, this.model.ActiveDevices);
+			Assert.Null(this.model.DefaultDevice);
+		}
+
+		[Fact]
+		public void DuplicateDeviceNotificationsKeepOneLiveModel()
+		{
+			var count = model.ActiveDevices.Count;
+			var duplicate = OutputDeviceModelTests.GetDeviceMock(defaultDevice.Id, "duplicate", deviceStateNotifMock.Object);
+			deviceStateNotifMock.Raise(m => m.ActiveDeviceAdded += null, duplicate);
+			deviceStateNotifMock.Raise(m => m.ActiveDeviceAdded += null, defaultDevice);
+			Assert.Equal(count, model.ActiveDevices.Count);
+			Assert.Same(defaultDevice, model.DefaultDevice);
+			Assert.Empty(duplicate.Processes);
+			Assert.NotEmpty(defaultDevice.Processes);
 		}
 
 		[Fact]

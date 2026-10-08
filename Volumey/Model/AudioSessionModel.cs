@@ -92,7 +92,7 @@ namespace Volumey.Model
         private static ILog logger;
         private static ILog Logger => logger ??= LogManager.GetLogger(typeof(AudioSessionModel));
 
-        private static Dispatcher dispatcher => App.Current?.Dispatcher ?? Dispatcher.CurrentDispatcher;
+        private readonly Dispatcher dispatcher = App.Current?.Dispatcher ?? Dispatcher.CurrentDispatcher;
 
         public AudioSessionModel(bool isMuted, int volume, string id, uint processId, string name, string filePath, Guid groupingParam, IAudioSessionVolume aVolume,
             IAudioSessionStateNotifications sStateNotifications)
@@ -192,6 +192,7 @@ namespace Volumey.Model
             this.sessionStateNotifications.SessionEnded -= OnSessionEnded;
             this.sessionStateNotifications.NameChanged -= OnNameChanged;
             this.sessionStateNotifications.Disconnected -= OnDisconnected;
+            this.sessionStateNotifications.StateChanged -= OnStateChanged;
             this.sessionStateNotifications.Dispose();
         }
     }

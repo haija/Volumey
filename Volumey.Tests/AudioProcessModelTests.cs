@@ -34,32 +34,30 @@ namespace Volumey.Tests
 		}
 		
 		[Fact]
-		public void TrackedSessionMustChangeToAnotherSession()
+        public Task TrackedSessionMustChangeToAnotherSession() => AudioNotificationTests.OnDispatcher(drain =>
 		{
+            var fixture = new AudioProcessModelTests();
 			//arrange
-			var trackedSession = this.proc.Sessions[0];
-			Assert.Single(proc.Sessions);
+            var trackedSession = fixture.proc.Sessions[0];
+            Assert.Single(fixture.proc.Sessions);
 
-			var additionalSession = GetSessionMock(12, true, proc.ProcessId.ToString());
-			proc.AddSession(additionalSession);
+            var additionalSession = GetSessionMock(12, true, fixture.proc.ProcessId.ToString());
+            fixture.proc.AddSession(additionalSession);
 
-			MethodInfo endedSessionHandler = typeof(OutputDeviceModel).GetMethod("ProcessEndedSession",
+            MethodInfo endedSessionHandler = typeof(AudioProcessModel).GetMethod("ProcessEndedSession",
 																				 BindingFlags.NonPublic | BindingFlags.Instance);
 
 			//act
 			
 			//Simulate that the handler was called from the background thread because normally it invokes by events
-			Task.Run(() =>
-						 {
-							 var task = (Task)endedSessionHandler.Invoke(this.proc, new object[] { trackedSession });
-							 task.Wait();
-						 }).ContinueWith(t =>
-			{
-				//assert
-				Assert.DoesNotContain(trackedSession, this.proc.Sessions);
-				trackedSessionStateNotif.Verify(n => n.Dispose(), Times.Once);
-			});
-		}
+            Task removal = null;
+            Task.Run(() => { removal = (Task)endedSessionHandler.Invoke(fixture.proc, new object[] { trackedSession }); }).GetAwaiter().GetResult();
+            drain();
+            removal.GetAwaiter().GetResult();
+            Assert.DoesNotContain(trackedSession, fixture.proc.Sessions);
+            fixture.trackedSessionStateNotif.Verify(n => n.Dispose(), Times.Once);
+            Assert.Equal(additionalSession.Volume, fixture.proc.Volume);
+        });
 
 		[Fact]
 		public void VolumeMustChangeToCorrectValue()

@@ -10,6 +10,7 @@ using System.Threading.Tasks;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
+using log4net;
 using Microsoft.Xaml.Behaviors.Core;
 using Volumey.Controls;
 using Volumey.CoreAudioWrapper.Wrapper;
@@ -122,7 +123,7 @@ namespace Volumey.Model
 		// private bool _muteKeyRegistered;
 		private object _sessionsLock = new object();
 		
-		private static Dispatcher _dispatcher => App.Current?.Dispatcher ?? Dispatcher.CurrentDispatcher;
+		private readonly Dispatcher _dispatcher = App.Current?.Dispatcher ?? Dispatcher.CurrentDispatcher;
 
 		public AudioProcessModel(int volume, bool isMuted, string name, uint processId, string filePath, Icon icon, Process proc, IAudioProcessStateMediator stateNotificationMediator = null)
 		{
@@ -314,39 +315,42 @@ namespace Volumey.Model
 
 		private async void OnSessionEnded(AudioSessionModel endedSession)
 		{
-			if(endedSession != null)
-				await ProcessEndedSession(endedSession);
+			try
+			{
+				if(endedSession != null)
+					await ProcessEndedSession(endedSession);
+			}
+			catch(OperationCanceledException) when(_dispatcher.HasShutdownStarted) { }
+			catch(Exception e) { LogManager.GetLogger(typeof(AudioProcessModel)).Error("Failed to remove ended audio session", e); }
 		}
 
 		private async Task ProcessEndedSession(AudioSessionModel endedSession)
 		{
+			if(_dispatcher.HasShutdownStarted || _dispatcher.HasShutdownFinished)
+				return;
 			endedSession.SessionEnded -= OnSessionEnded;
 			await _dispatcher.InvokeAsync(() =>
 			{
+				if(_disposed)
+					return;
 				lock(_sessionsLock)
 				{
 					this.Sessions.Remove(endedSession);
-					if(this.Sessions.Count == 0)
-						InvokeExited();
-				}
-			}).Task.ContinueWith(_ =>
-			{
-				if(_trackedSession == endedSession)
-				{
-					_trackedSession.VolumeChanged -= OnTrackedSessionVolumeChanged;
-					_trackedSession.MuteStateChanged -= OnTrackedSessionStateChanged;
-
-					lock(_sessionsLock)
+					if(_trackedSession == endedSession)
 					{
+						_trackedSession.VolumeChanged -= OnTrackedSessionVolumeChanged;
+						_trackedSession.MuteStateChanged -= OnTrackedSessionStateChanged;
 						_trackedSession = this.Sessions.FirstOrDefault();
-					}
-					if(_trackedSession != null)
-					{
-						_trackedSession.VolumeChanged += OnTrackedSessionVolumeChanged;
-						_trackedSession.MuteStateChanged += OnTrackedSessionStateChanged;
+						if(_trackedSession != null)
+						{
+							_trackedSession.VolumeChanged += OnTrackedSessionVolumeChanged;
+							_trackedSession.MuteStateChanged += OnTrackedSessionStateChanged;
+						}
 					}
 				}
 				endedSession.Dispose();
+				if(this.Sessions.Count == 0)
+					InvokeExited();
 			});
 		}
 

@@ -9,6 +9,7 @@ using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Threading;
+using log4net;
 using Volumey.Controls;
 using Volumey.CoreAudioWrapper.CoreAudio;
 using Volumey.CoreAudioWrapper.Wrapper;
@@ -52,9 +53,8 @@ namespace Volumey.Model
 		private WAVEFORMATEX? currentStreamFormat;
 
 
-		private readonly SemaphoreSlim _processesSemaphore = new SemaphoreSlim(1, 1);
-
-		private static Dispatcher dispatcher => App.Current?.Dispatcher ?? Dispatcher.CurrentDispatcher;
+		private readonly Dispatcher dispatcher = App.Current?.Dispatcher ?? Dispatcher.CurrentDispatcher;
+		private bool disposed;
 
 		public OutputDeviceModel(IDevice device, IDeviceStateNotificationHandler deviceStateNotifications, ISessionProvider sessionProvider,
 			MasterSessionModel master, List<AudioProcessModel> processes)
@@ -65,6 +65,7 @@ namespace Volumey.Model
 				throw new ArgumentNullException(nameof(processes));
 
 			this.Processes = new ObservableCollection<AudioProcessModel>(processes);
+			this._cachedImmutableProcesses = this.Processes.ToImmutableList();
 
 			foreach(AudioProcessModel process in processes)
 			{
@@ -101,37 +102,13 @@ namespace Volumey.Model
 		internal void ResetMuteHotkeys()
 			=> this.Master.ResetMuteHotkey();
 
-		internal async Task<IImmutableList<AudioProcessModel>> GetImmutableProcessesAsync()
-		{
-			if(_cachedImmutableProcesses != null)
-				return _cachedImmutableProcesses;
-			
-			await _processesSemaphore.WaitAsync();
-			try
-			{
-				return _cachedImmutableProcesses = this.Processes.ToImmutableList();
-			}
-			finally
-			{
-				_processesSemaphore.Release();
-			}
-		}
+		// Publish complete snapshots on the UI thread. Readers never acquire a lock
+		// that a background handler could hold while waiting for this dispatcher.
+		internal Task<IImmutableList<AudioProcessModel>> GetImmutableProcessesAsync()
+			=> Task.FromResult(GetImmutableProcesses());
 
 		internal IImmutableList<AudioProcessModel> GetImmutableProcesses()
-		{
-			if(_cachedImmutableProcesses != null)
-				return _cachedImmutableProcesses;
-			
-			_processesSemaphore.Wait();
-			try
-			{
-				return _cachedImmutableProcesses = this.Processes.ToImmutableList();
-			}
-			finally
-			{
-				_processesSemaphore.Release();
-			}
-		}
+			=> Volatile.Read(ref _cachedImmutableProcesses);
 
 		/// <summary>
 		/// Invalidates cached immutable processes collection if the original collection was changed
@@ -140,7 +117,7 @@ namespace Volumey.Model
 		/// <param name="e"></param>
 		private void OnProcessesCollectionChanged(object sender, NotifyCollectionChangedEventArgs e)
 		{
-			_cachedImmutableProcesses = null;
+			Volatile.Write(ref _cachedImmutableProcesses, this.Processes.ToImmutableList());
 		}
 
 		private void OnIconPathChanged(string deviceId)
@@ -210,62 +187,67 @@ namespace Volumey.Model
 
 		private async void OnProcessExited(AudioProcessModel exitedProcess)
 		{
-			await OnProcessExitedAsync(exitedProcess);
+			try { await OnProcessExitedAsync(exitedProcess); }
+			catch(OperationCanceledException) when(dispatcher.HasShutdownStarted) { }
+			catch(Exception e) { LogManager.GetLogger(typeof(OutputDeviceModel)).Error("Failed to remove exited audio process", e); }
 		}
 
 		private async Task OnProcessExitedAsync(AudioProcessModel exitedProcess)
 		{
-			await _processesSemaphore.WaitAsync();
-			try
+			if(dispatcher.HasShutdownStarted || dispatcher.HasShutdownFinished)
+				return;
+			await dispatcher.InvokeAsync(() =>
 			{
-				await dispatcher.InvokeAsync(() =>
-				{
-					this.Processes.Remove(exitedProcess);
-				});
-			}
-			catch { }
-			finally
-			{
-				_processesSemaphore.Release();
-			}
-			exitedProcess.Exited -= OnProcessExited;
-			exitedProcess.Dispose();
+				if(disposed)
+					return;
+				exitedProcess.Exited -= OnProcessExited;
+				this.Processes.Remove(exitedProcess);
+				exitedProcess.Dispose();
+			});
 		}
 
 		private async void OnSessionCreated(object sender, SessionCreatedEventArgs e)
 		{
-			await _processesSemaphore.WaitAsync();
 			try
 			{
+				await AddSessionAsync(e);
+			}
+			catch(OperationCanceledException) when(dispatcher.HasShutdownStarted) { }
+			catch(Exception exception) { LogManager.GetLogger(typeof(OutputDeviceModel)).Error("Failed to add audio session", exception); }
+		}
+
+		private async Task AddSessionAsync(SessionCreatedEventArgs e)
+		{
+			if(dispatcher.HasShutdownStarted || dispatcher.HasShutdownFinished)
+				return;
+			await dispatcher.InvokeAsync(() =>
+			{
+				if(disposed)
+				{
+					e.SessionModel.Dispose();
+					return;
+				}
 				if(Processes.FirstOrDefault(p => p.GroupingParam.Equals(e.SessionModel.GroupingParam) ||
 											     p.FilePath.Equals(e.SessionModel.FilePath)) is AudioProcessModel
 				   process)
 				{
-					await dispatcher.InvokeAsync(() =>
-					{
-						e.SessionModel.Name = process.Name;
-						process.AddSession(e.SessionModel);
-					});
+					e.SessionModel.Name = process.Name;
+					process.AddSession(e.SessionModel);
 				}
 				else
 				{
 					AudioProcessModel newProcess = e.SessionModel.GetProcessModelFromSessionModel(e.SessionControl);
-					newProcess.AddSession(e.SessionModel);
-					
-					await dispatcher.InvokeAsync(() =>
+					if(newProcess == null)
 					{
-						this.Processes.Add(newProcess);
-					});
-					
+						e.SessionModel.Dispose();
+						return;
+					}
+					newProcess.AddSession(e.SessionModel);
 					newProcess.Exited += OnProcessExited;
+					this.Processes.Add(newProcess);
 					this.ProcessCreated?.Invoke(newProcess);
 				}
-			}
-			catch { }
-			finally
-			{
-				_processesSemaphore.Release();
-			}
+			});
 		}
 
 		internal bool CompareId(string deviceId) =>
@@ -278,8 +260,16 @@ namespace Volumey.Model
 			PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
 		}
 
-		public async void Dispose()
+		public void Dispose()
 		{
+			if(!dispatcher.CheckAccess())
+			{
+				dispatcher.BeginInvoke(new Action(Dispose));
+				return;
+			}
+			if(disposed)
+				return;
+			disposed = true;
 			this.sessionProvider.SessionCreated -= OnSessionCreated;
 			this.sessionProvider.Dispose();
 			this.deviceStateEvents.DeviceDisabled -= OnDeviceDisabled;
@@ -288,19 +278,13 @@ namespace Volumey.Model
 			this.deviceStateEvents.FormatChanged -= OnFormatChanged;
 			this.Master.Dispose();
 
-			await _processesSemaphore.WaitAsync();
-			try
+			foreach(var process in this.Processes)
 			{
-				foreach(var process in this.Processes)
-					process.Dispose();
+				process.Exited -= OnProcessExited;
+				process.Dispose();
 			}
-			catch { }
-			finally
-			{
-				_processesSemaphore.Release();
-			}
-			
-			this._processesSemaphore.Dispose();
+			this.Processes.Clear();
+			this.Processes.CollectionChanged -= OnProcessesCollectionChanged;
 			this._disabled = null;
 			this.ProcessCreated = null;
 		}

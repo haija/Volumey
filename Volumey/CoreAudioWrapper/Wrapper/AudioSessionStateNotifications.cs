@@ -20,6 +20,7 @@ namespace Volumey.CoreAudioWrapper.Wrapper
         public event Action<AudioSessionState> StateChanged;
         private readonly IAudioSessionControl2 sessionControl;
         private readonly ISimpleAudioVolume sVolume;
+        private readonly AudioNotificationQueue notifications = new AudioNotificationQueue();
 
         public AudioSessionStateNotifications(IAudioSessionControl2 sControl)
         {
@@ -32,7 +33,7 @@ namespace Volumey.CoreAudioWrapper.Wrapper
 
         public int OnDisplayNameChanged(string newDisplayName, ref Guid eventContext)
         {
-            this.NameChanged?.Invoke(newDisplayName);
+            notifications.Post(() => this.NameChanged?.Invoke(newDisplayName));
             return 0;
         }
 
@@ -45,7 +46,7 @@ namespace Volumey.CoreAudioWrapper.Wrapper
                 return 0;
 
             ImageSource icon = null;
-            App.Current.Dispatcher.Invoke(() =>
+            notifications.Post(() =>
             {
                 try
                 {
@@ -75,7 +76,7 @@ namespace Volumey.CoreAudioWrapper.Wrapper
 
         public int OnSessionDisconnected(AudioSessionDisconnectReason disconnectReason)
         {
-            this.Disconnected?.Invoke(disconnectReason);
+            notifications.Post(() => this.Disconnected?.Invoke(disconnectReason));
             return 0;
         }
 
@@ -87,12 +88,15 @@ namespace Volumey.CoreAudioWrapper.Wrapper
             
             int newVolumeValue = Convert.ToInt32(newVolume * 100);
 
-            //prevent invoking event if new volume value is not the same as the actual session volume value
-            this.sVolume.GetMasterVolume(out float volume);
-            var actualVolumeValue = Convert.ToInt32(volume * 100);
-            if(newVolumeValue != actualVolumeValue)
-                return 0;
-            this.VolumeChanged?.Invoke(new VolumeChangedEventArgs(newVolumeValue, newMuteState));
+            notifications.Post(() =>
+            {
+                // A newer hotkey or slider change can overtake this queued event.
+                // Check for stale data here, after leaving the native callback.
+                this.sVolume.GetMasterVolume(out float volume);
+                this.sVolume.GetMute(out bool muted);
+                if(newVolumeValue == Convert.ToInt32(volume * 100) && newMuteState == muted)
+                    this.VolumeChanged?.Invoke(new VolumeChangedEventArgs(newVolumeValue, newMuteState));
+            });
             return 0;
         }
 
@@ -100,10 +104,10 @@ namespace Volumey.CoreAudioWrapper.Wrapper
         {
             if(newState == AudioSessionState.Expired)
             {
-                this.SessionEnded?.Invoke();
+                notifications.Post(() => this.SessionEnded?.Invoke());
             }
             else
-                this.StateChanged?.Invoke(newState);
+                notifications.Post(() => this.StateChanged?.Invoke(newState));
 
             return 0;
         }
@@ -116,6 +120,8 @@ namespace Volumey.CoreAudioWrapper.Wrapper
 
         public void Dispose()
         {
+            if(!notifications.TryDispose())
+                return;
             this.UnregisterNotifications();
         }
     }

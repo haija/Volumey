@@ -37,23 +37,21 @@ namespace Volumey.Tests
         }
 
         [Fact]
-        public void ProcessExitedEvent_ProcessShouldBeRemoved()
+        public Task ProcessExitedEvent_ProcessShouldBeRemoved() => AudioNotificationTests.OnDispatcher(drain =>
         {
-            var process = this.model.Processes[0];
+            var device = GetDeviceMock("test", "speakers", this.deviceStateMock.Object);
+            var process = device.Processes[0];
             MethodInfo processExitedHandler = typeof(OutputDeviceModel).GetMethod("OnProcessExitedAsync",
                                                                                    BindingFlags.NonPublic |
                                                                                    BindingFlags.Instance);
 
             //Simulate that the handler was called from the background thread because normally it invokes by events
-            Task.Run(() =>
-            {
-                var task = (Task)processExitedHandler?.Invoke(this.model, new object[] { process });
-                task.Wait();
-            }).ContinueWith((t) =>
-            {
-                Assert.DoesNotContain(process, this.model.Processes);
-            });
-        }
+            Task removal = null;
+            Task.Run(() => { removal = (Task)processExitedHandler.Invoke(device, new object[] { process }); }).GetAwaiter().GetResult();
+            drain();
+            removal.GetAwaiter().GetResult();
+            Assert.DoesNotContain(process, device.Processes);
+        });
         
 
         [Fact]

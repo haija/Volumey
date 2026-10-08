@@ -24,6 +24,7 @@ namespace Volumey.CoreAudioWrapper.Wrapper
         public event Action<OutputDeviceModel> ActiveDeviceAdded;
 
         private readonly IMMDeviceEnumerator deviceEnumerator;
+        private readonly AudioNotificationQueue notifications = new AudioNotificationQueue();
 
         private ILog logger;
         private ILog Logger => logger ??= LogManager.GetLogger(typeof(DeviceStateNotificationsHandler));
@@ -44,7 +45,7 @@ namespace Volumey.CoreAudioWrapper.Wrapper
         {
             if(flow == EDataFlow.Render && role == ERole.Console)
             {
-                this.DefaultDeviceChanged?.Invoke(deviceId);
+                notifications.Post(() => this.DefaultDeviceChanged?.Invoke(deviceId));
             }
             return 0;
         }
@@ -55,7 +56,7 @@ namespace Volumey.CoreAudioWrapper.Wrapper
         /// <param name="deviceId">The ID of the new Endpoint device</param>
         public int OnDeviceAdded(string deviceId)
         {
-            App.Current.Dispatcher.Invoke(() =>
+            notifications.Post(() =>
             {
                 try
                 {
@@ -80,7 +81,11 @@ namespace Volumey.CoreAudioWrapper.Wrapper
         /// Called when an Endpoint device is removed from the system
         /// </summary>
         /// <param name="deviceId">The ID of the Endpoint device that was removed</param>
-        public int OnDeviceRemoved(string deviceId) => 0;
+        public int OnDeviceRemoved(string deviceId)
+        {
+            notifications.Post(() => this.DeviceDisabled?.Invoke(deviceId));
+            return 0;
+        }
 
         /// <summary>
         /// Called when the state of an Endpoint device changes
@@ -89,22 +94,23 @@ namespace Volumey.CoreAudioWrapper.Wrapper
         /// <param name="newState">The new state of the device</param>
         public int OnDeviceStateChanged(string deviceId, DeviceState newState)
         {
-            App.Current.Dispatcher.Invoke(() =>
+            notifications.Post(() =>
             {
                 try
                 {
+                    // A removed/unplugged endpoint may no longer be queryable.
+                    if(newState != DeviceState.Active)
+                    {
+                        this.DeviceDisabled?.Invoke(deviceId);
+                        return;
+                    }
                     this.deviceEnumerator.GetDevice(deviceId, out IMMDevice newDevice);
                     var device = new MMDevice(newDevice);
                     if(device.GetDataFlow() == EDataFlow.Render)
                     {
-                        if(newState != DeviceState.Active)
-                            this.DeviceDisabled?.Invoke(deviceId);
-                        else
-                        {
-                            var model = device.GetOutputDeviceModel(this);
-                            if(model != null)
-                                this.ActiveDeviceAdded?.Invoke(model);
-                        }
+                        var model = device.GetOutputDeviceModel(this);
+                        if(model != null)
+                            this.ActiveDeviceAdded?.Invoke(model);
                     }
                 }
                 catch { }
@@ -117,21 +123,21 @@ namespace Volumey.CoreAudioWrapper.Wrapper
             var friendlyName = PROPERTYKEY.DeviceProperties.FriendlyName;
             if(key.Guid == friendlyName.Guid && (key.Id == friendlyName.Id || key.Id == PROPERTYKEY.DeviceProperties.Description.Id))
             {
-                this.NameChanged?.Invoke(deviceId);
+                notifications.Post(() => this.NameChanged?.Invoke(deviceId));
                 return 0;
             }
 
             var iconPath = PROPERTYKEY.DeviceProperties.IconPath;
             if(key.Guid == iconPath.Guid && key.Id == iconPath.Id)
             {
-                this.IconPathChanged?.Invoke(deviceId);
+                notifications.Post(() => this.IconPathChanged?.Invoke(deviceId));
                 return 0;
             }
 
             var format = PROPERTYKEY.DeviceProperties.DeviceFormat;
             if(key.Guid == format.Guid && key.Id == format.Id)
             {
-                this.FormatChanged?.Invoke(deviceId);
+                notifications.Post(() => this.FormatChanged?.Invoke(deviceId));
             }
             return 0;
         }
@@ -149,11 +155,17 @@ namespace Volumey.CoreAudioWrapper.Wrapper
         private void UnregisterDeviceNotifications()
         {
             //Unregister on the thread pool because this call occasionally hangs and might hang the entire application when executed in the UI thread :\
-            Task.Run(() => { this.deviceEnumerator.UnregisterEndpointNotificationCallback(this); });
+            Task.Run(() =>
+            {
+                try { this.deviceEnumerator.UnregisterEndpointNotificationCallback(this); }
+                catch(Exception e) { Logger.Error("Failed to unregister device notifications", e); }
+            });
         }
 
         public void Dispose()
         {
+            if(!notifications.TryDispose())
+                return;
             this.UnregisterDeviceNotifications();
         }
     }
